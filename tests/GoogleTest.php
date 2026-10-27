@@ -140,6 +140,7 @@ class GoogleTest extends TestCase
             ->push(['results' => [
                 ['text' => 'laravel cms', 'keywordIdeaMetrics' => ['avgMonthlySearches' => '1900']],
                 ['text' => 'Laravel Headless CMS', 'keywordIdeaMetrics' => ['avgMonthlySearches' => '320']],
+                ['text' => 'laravel  headless cms', 'keywordIdeaMetrics' => ['avgMonthlySearches' => '10']],
             ], 'nextPageToken' => 'next'])
             ->push(['results' => [
                 ['text' => 'laravel admin panel', 'keywordIdeaMetrics' => ['avgMonthlySearches' => '2400']],
@@ -265,6 +266,17 @@ class GoogleTest extends TestCase
     }
 
 
+    public function testRedirect(): void
+    {
+        $this->fakeToken();
+        Http::fake([self::URL . ':*' => Http::response('', 302, ['Location' => 'https://example.com/'])]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('HTTP status 302');
+        Keywords::volume(['laravel cms']);
+    }
+
+
     public function testRequestWait(): void
     {
         $this->fakeToken();
@@ -275,6 +287,10 @@ class GoogleTest extends TestCase
 
         Keywords::related('laravel cms');
         Sleep::assertSleptTimes(1);
+
+        // other processes use their own driver instances but share the cache
+        Keywords::driver('google', ['timeout' => 10])->volume(['laravel cms']);
+        Sleep::assertSleptTimes(2);
     }
 
 

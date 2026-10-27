@@ -57,9 +57,6 @@ class Google implements Driver
     /** @var array<string, mixed> */
     private array $config;
 
-    private float $last = 0;
-
-
     /**
      * @param array<string, mixed> $config Settings from ./config/keywords-bridge.php
      */
@@ -81,7 +78,7 @@ class Google implements Driver
 
     public function volume(array $keywords, ?string $country = null): array
     {
-        $keywords = array_values(array_unique(array_filter(array_map(fn($keyword) => $this->normalize($keyword), $keywords), fn($keyword) => $keyword !== '')));
+        $keywords = Keyword::unique($keywords);
         // Google rejects keywords with more than 80 characters or 10 words
         $valid = array_filter($keywords, fn($keyword) => mb_strlen($keyword) <= 80 && count(explode(' ', $keyword)) <= 10);
         $volumes = [];
@@ -94,7 +91,7 @@ class Google implements Driver
 
                 // close variants like "car" and "cars" are merged into one result
                 foreach ([$result['text'] ?? '', ...($result['closeVariants'] ?? [])] as $text) {
-                    $volumes[$this->normalize($text)] ??= $volume;
+                    $volumes[Keyword::normalize($text)] ??= $volume;
                 }
             }
         }
@@ -105,7 +102,7 @@ class Google implements Driver
 
     public function related(string $keyword, ?string $country = null, int $limit = 50): array
     {
-        if (($keyword = $this->normalize($keyword)) === '') {
+        if (($keyword = Keyword::normalize($keyword)) === '') {
             return [];
         }
 
@@ -117,11 +114,12 @@ class Google implements Driver
             $data = $this->request('generateKeywordIdeas', $body);
 
             foreach ($data['results'] ?? [] as $result) {
-                $list[] = new Keyword($this->normalize($result['text'] ?? ''), $this->value($result['keywordIdeaMetrics'] ?? []));
+                $text = Keyword::normalize($result['text'] ?? '');
+                $list[$text] ??= new Keyword($text, $this->value($result['keywordIdeaMetrics'] ?? []));
             }
         } while (count($list) < $limit && !empty($data['results']) && ($body['pageToken'] = $data['nextPageToken'] ?? null));
 
-        return array_slice($list, 0, $limit);
+        return array_slice(array_values($list), 0, $limit);
     }
 
 
@@ -139,14 +137,14 @@ class Google implements Driver
             return $token;
         }
 
-        $response = Http::asForm()->acceptJson()->timeout(30)->post('https://oauth2.googleapis.com/token', [
+        $response = Http::asForm()->acceptJson()->withoutRedirecting()->timeout(30)->post('https://oauth2.googleapis.com/token', [
             'grant_type' => 'refresh_token',
             'client_id' => $this->config['client'],
             'client_secret' => $this->config['secret'],
             'refresh_token' => $this->config['refresh'],
         ]);
 
-        if ($response->failed() || !is_string($token = $response->json('access_token'))) {
+        if (!$response->successful() || !is_string($token = $response->json('access_token'))) {
             throw new \RuntimeException('Fetching the Google OAuth access token failed with HTTP status ' . $response->status());
         }
 
@@ -169,19 +167,7 @@ class Google implements Driver
             $headers['login-customer-id'] = preg_replace('/[^0-9]/', '', (string) $this->config['login']);
         }
 
-        return Http::withToken($token)->withHeaders($headers)->acceptJson()->timeout($this->config['timeout'] ?? 30);
-    }
-
-
-    /**
-     * Normalizes the keyword
-     *
-     * @param string $keyword Keyword
-     * @return string Trimmed keyword in lower case with single spaces
-     */
-    protected function normalize(string $keyword): string
-    {
-        return mb_strtolower(trim((string) preg_replace('/\s+/u', ' ', $keyword)));
+        return Http::withToken($token)->withHeaders($headers)->acceptJson()->withoutRedirecting()->timeout($this->config['timeout'] ?? 30);
     }
 
 
@@ -198,7 +184,7 @@ class Google implements Driver
         $url = "https://googleads.googleapis.com/{$this->config['version']}/customers/{$customer}:{$method}";
 
         // KeywordPlanIdeaService allows one request per second for each customer
-        if (($wait = $this->last + 1 - microtime(true)) > 0) {
+        if (($wait = $this->slot($customer) - microtime(true)) > 0) {
             Sleep::usleep((int) ($wait * 1000000));
         }
 
@@ -210,16 +196,33 @@ class Google implements Driver
             }
         } catch (ConnectionException $e) {
             throw new \RuntimeException('Google Ads API request failed: ' . $e->getMessage(), 0, $e);
-        } finally {
-            $this->last = microtime(true);
         }
 
-        if ($response->failed()) {
+        if (!$response->successful()) {
             throw new \RuntimeException(sprintf('Google Ads API request failed with HTTP status %d: %s',
                 $response->status(), $response->json('error.message', 'Unknown error')));
         }
 
         return (array) $response->json();
+    }
+
+
+    /**
+     * Reserves the next free request slot of the customer, shared by all processes
+     *
+     * @param string $customer Google Ads customer ID
+     * @return float Unix timestamp when the request can be sent
+     */
+    protected function slot(string $customer): float
+    {
+        $key = 'keywords-google:slot:' . $customer;
+
+        // locks expiring after one second would be imprecise because some cache stores use whole seconds
+        return Cache::lock($key . ':lock', 5)->block(5, function () use ($key) {
+            $time = max(microtime(true), (float) Cache::get($key, 0) + 1);
+            Cache::put($key, $time, 60);
+            return $time;
+        });
     }
 
 

@@ -55,7 +55,7 @@ $result = Keywords::related('laravel cms', 'de', 100);
 * Google merges close variants like "car" and "cars" and returns the same volume for both.
 * Keywords with more than 80 characters or 10 words are rejected by Google and returned with a `null` volume.
 * The volume is the average of the last 12 months as estimated by Google Ads.
-* Google allows one keyword planning request per second, so the driver waits between consecutive requests.
+* Google allows one keyword planning request per second, so the driver waits between consecutive requests. The wait is shared by all processes using the same cache store, which must support locks.
 
 ## License
 
